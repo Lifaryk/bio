@@ -6,41 +6,38 @@
   const repo = 'bio';
   const branch = 'main';
 
-  const rawFolder = grid.dataset.imageFolder.trim();
+  const rawFolder = (grid.dataset.imageFolder || '').trim();
+  const folder = rawFolder.replace(/\/+$/, '');
   const label = grid.dataset.imageLabel || 'Image';
   const extensions = new Set(['jpg', 'jpeg', 'png', 'gif', 'webp', 'avif', 'bmp', 'svg']);
   const cacheTtlMs = 10 * 60 * 1000;
 
-  function normalizeRepoPath(path) {
-    let cleaned = decodeURIComponent(path.split(/[?#]/)[0])
-      .replace(/^https?:\/\/[^/]+/i, '')
+  function resolveRepoPath(folderValue) {
+    const cleanValue = decodeURIComponent(folderValue.split(/[?#]/)[0])
+      .replace(/^https?:\/\/[^/]+/i, '');
+
+    const currentDirParts = window.location.pathname
       .replace(/^\/+/, '')
-      .replace(/\/+$/, '');
+      .replace(/[^/]*$/, '')
+      .split('/')
+      .filter(Boolean);
 
-    if (!path.startsWith('/') && !path.startsWith('http')) {
-      const currentDir = window.location.pathname
-        .replace(/^\/+/, '')
-        .replace(/[^/]*$/, '');
-      const stack = currentDir ? currentDir.split('/').filter(Boolean) : [];
+    const stack = cleanValue.startsWith('/') ? [] : [...currentDirParts];
 
-      for (const part of cleaned.split('/')) {
-        if (!part || part === '.') continue;
-        if (part === '..') stack.pop();
-        else stack.push(part);
-      }
-      cleaned = stack.join('/');
+    for (const part of cleanValue.split('/')) {
+      if (!part || part === '.') continue;
+      if (part === '..') stack.pop();
+      else stack.push(part);
     }
 
-    return cleaned;
+    return stack.join('/');
   }
 
-  const repoPath = normalizeRepoPath(rawFolder);
-  const webFolderUrl = rawFolder.replace(/\/+$/, '');
-
   async function getFilesFromGitHubApi() {
+    const repoPath = resolveRepoPath(folder || '.');
     if (!repoPath) return null;
 
-    const cacheKey = `gh_img_cache:${owner}/${repo}@${branch}:${repoPath}`;
+    const cacheKey = `gh_gallery:${owner}/${repo}@${branch}:${repoPath}`;
     try {
       const cachedRaw = localStorage.getItem(cacheKey);
       if (cachedRaw) {
@@ -51,7 +48,9 @@
       }
     } catch (_) {}
 
-    const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${encodeURIComponent(repoPath).replace(/%2F/g, '/')}?ref=${encodeURIComponent(branch)}`;
+    const encodedPath = repoPath.split('/').map(encodeURIComponent).join('/');
+    const apiUrl = `https://api.github.com/repos/${owner}/${repo}/contents/${encodedPath}?ref=${encodeURIComponent(branch)}`;
+
     const response = await fetch(apiUrl, {
       headers: { Accept: 'application/vnd.github+json' }
     });
@@ -63,10 +62,7 @@
     const files = items
       .filter(item => item.type === 'file')
       .map(item => item.name)
-      .filter(name => {
-        const ext = name.split('.').pop().toLowerCase();
-        return extensions.has(ext);
-      });
+      .filter(name => extensions.has(name.split('.').pop().toLowerCase()));
 
     try {
       localStorage.setItem(cacheKey, JSON.stringify({ time: Date.now(), files }));
@@ -76,22 +72,27 @@
   }
 
   async function getFilesFromDirectoryListing() {
-    const response = await fetch(`${webFolderUrl}/`);
+    const base = folder || '.';
+    const response = await fetch(`${base}/`);
     if (!response.ok) throw new Error('Could not read the image folder');
 
     const html = await response.text();
+    if (!/<a\s+[^>]*href=/i.test(html)) {
+      throw new Error('Directory listing is not available');
+    }
+
     const doc = new DOMParser().parseFromString(html, 'text/html');
     return [...doc.querySelectorAll('a[href]')]
       .map(link => decodeURIComponent(link.getAttribute('href').split(/[?#]/)[0]))
       .filter(name => {
-        const ext = name.split('.').pop().toLowerCase();
-        return name !== '../' && extensions.has(ext);
+        const extension = name.split('.').pop().toLowerCase();
+        return name !== '../' && extensions.has(extension);
       });
   }
 
   try {
     let files = await getFilesFromGitHubApi();
-    if (!files) {
+    if (files === null) {
       files = await getFilesFromDirectoryListing();
     }
 
@@ -99,10 +100,11 @@
       a.localeCompare(b, undefined, { numeric: true, sensitivity: 'base' })
     );
 
+    const imgBase = folder || '.';
     for (const [index, filename] of files.entries()) {
       const figure = document.createElement('figure');
       const image = document.createElement('img');
-      image.src = `${webFolderUrl}/${encodeURIComponent(filename)}`;
+      image.src = `${imgBase}/${encodeURIComponent(filename)}`;
       image.alt = `${label} ${index + 1}`;
       image.loading = 'lazy';
       figure.append(image);
